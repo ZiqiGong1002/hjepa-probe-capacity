@@ -41,6 +41,22 @@ def _cache_split(heads, dataset, cfg, device):
     return embeds, targets
 
 
+def _random_init_model(trained, train_cfg, seed):
+    """Same architecture as the checkpoint, freshly initialized by the official constructor."""
+    import stable_pretraining  # noqa: F401  registers the ${eval:...} resolver used by train configs
+    from hjepa_utils import create_world_model
+
+    torch.manual_seed(seed)
+    model, _ = create_world_model(train_cfg)
+    # Compare parameters only: buffers such as latent_action_queue are training-time caches.
+    trained_state, random_state = dict(trained.named_parameters()), dict(model.named_parameters())
+    if trained_state.keys() != random_state.keys() or any(
+        trained_state[k].shape != random_state[k].shape for k in trained_state
+    ):
+        raise ValueError("Random model does not match the checkpoint architecture.")
+    return model
+
+
 def _cached_batches(embeds, targets, order, batch_size, drop_last, limit=None):
     n_batches = len(order) // batch_size if drop_last else -(-len(order) // batch_size)
     for batch_idx in range(n_batches):
@@ -59,6 +75,9 @@ def run(cfg):
     cache_dir = fpde._cache_dir(cfg)
     model, policy_path, train_cfg = fpde._load_policy(cfg.policy, cache_dir)
     normalizer_artifact = fpde.load_normalizer_artifact(fpde._normalizer_path_for_policy(policy_path))
+    if bool(cfg.get("random_init", False)):
+        model = _random_init_model(model, train_cfg, int(cfg.get("seed", 42)))
+        logging.info("Using a randomly initialized (untrained) world model as the probing baseline")
     model = fpde._freeze_model(model)
     fpde._validate_dense_assumptions(model)
     output_dir = Path(cfg.output_dir).expanduser()
