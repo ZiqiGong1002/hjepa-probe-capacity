@@ -1,133 +1,161 @@
-# H-JEPA FourRoom probing: reproduction and probe-capacity study
+# Probe Capacity and Selective Abstraction in H-JEPA
 
 [中文版](README.zh-CN.md) · [Original upstream README](UPSTREAM_README.md)
 
-[H-JEPA](https://arxiv.org/abs/2610.06805) reads off what each level of its hierarchy remembers by training a small probe network on frozen features. Its Fig. 4 concludes that higher levels keep the agent's position but progressively drop information about distractors ("selective abstraction"). The paper uses a single probe architecture (an MLP with 512 hidden units). This study asks whether that conclusion depends on how strong the probe is.
+This repository extends the official implementation of [H-JEPA](https://arxiv.org/abs/2610.06805) with a probing study on the FourRoom environment. It (i) reproduces the paper's level-wise probing results and (ii) tests whether the paper's "selective abstraction" conclusion is robust to the capacity of the probe used to measure it.
 
-- **Upstream:** [kevinghst/H-JEPA](https://github.com/kevinghst/H-JEPA) at commit `97054ec` (MIT). Official FourRoom checkpoints from Hugging Face, sha256 verified.
-- **My changes:** three commits on top of upstream (`git log 97054ec..HEAD -- h_jepa`), plus `probing/` and this README (the original is kept as [`UPSTREAM_README.md`](UPSTREAM_README.md)).
-- **Not included:** datasets and checkpoints (download them as described in [`UPSTREAM_README.md`](UPSTREAM_README.md)).
-
-## TL;DR
-
-1. **Fig. 4 reproduces.** On the 4-level model over 3 model seeds, distractor-position error per level is 0.053 / 0.167 / 0.340 / 0.553, against roughly 0.06 / 0.19 / 0.37 / 0.58 read from the paper's plot.
-2. **The layer-wise trend holds for MLP probes of any tested width.** On the 3-level model, distractor error rises from level 1 to level 3 for MLP probes with 128, 512 and 2048 hidden units, and widths above 128 change the numbers by at most 0.02.
-3. **A linear probe gives a much weaker picture.** With a linear probe, distractor error is 0.45 / 0.67 / 0.90, so how much information appears "dropped" depends strongly on the probe class.
-4. **The information comes from training.** A randomly initialised encoder with the same architecture gives distractor error around 0.78 at every level and agent-position error around 0.91.
-5. **One mismatch remains.** For the 2-level model (Fig. 12), level 2 matches the paper but level 1 does not (0.156 vs about 0.01). The cause is unknown.
-
-## Setup
-
-- **Model:** official H-JEPA FourRoom checkpoints (2, 3 and 4 levels), frozen.
-- **Probe:** official probing config: AdamW, lr 1e-3, weight decay 1e-4, batch 128, 60 epochs, probe seed 42. One hidden layer with LayerNorm and GELU; only the hidden width changes (0 = linear).
-- **Targets:** agent position (`xy`), distractor position (`distractor0_xy`), geodesic distance to the nearest distractor (`min_distractor_dist`).
-- **Metric:** normalised MSE (NMSE) on the evaluation split. 1.0 means no better than predicting the mean; lower is better.
-- **Hardware:** RTX 4080 Laptop GPU 12 GB, WSL2. Python 3.11, torch 2.7.1+cu126.
-
-### Code changes (in `h_jepa/`)
-
-| Commit | Change |
+| | |
 |---|---|
-| Make probe hidden_dim configurable | `probe_hidden_dim` option; `0` = linear; default 512 keeps the original code path |
-| Add cached-embedding probing runner | `main_probing_cached.py`: runs the frozen encoder once and caches its outputs, then trains the same probe heads with the same RNG sequence and metrics. |
-| Cached probing: optional random_init baseline | `+random_init=true` builds the same architecture untrained, via the official constructor |
+| Upstream | [kevinghst/H-JEPA](https://github.com/kevinghst/H-JEPA), commit `97054ec`, MIT License |
+| Checkpoints | Official FourRoom checkpoints (2, 3 and 4 levels) from Hugging Face, SHA-256 verified |
+| Modifications | Three commits under `h_jepa/` (`git log 97054ec..HEAD -- h_jepa`), experiment code and results under `probing/` |
+| Not included | Datasets and checkpoints; see [`UPSTREAM_README.md`](UPSTREAM_README.md) for download instructions |
 
-**Check that the cached runner is faithful:** on the 3-level model (seed 42, MLP512 probe), all 18 NMSE values from the cached runner equal the official pipeline's exactly (max difference 0). See `probing/scripts/compare_metrics.py`.
+## Summary of findings
+
+1. **Reproduction of Fig. 4.** For the 4-level model (3 model seeds), distractor-position NMSE per level is 0.053 / 0.167 / 0.340 / 0.553, consistent with the values reported in the paper (≈0.06 / 0.19 / 0.37 / 0.58).
+2. **Robustness to MLP probe width.** For the 3-level model, distractor-position NMSE increases monotonically with level for MLP probes of width 128, 512 and 2048. Performance saturates at width 128; larger probes change level-3 NMSE by at most 0.02.
+3. **Sensitivity to probe class.** A linear probe yields substantially higher NMSE (0.446 / 0.672 / 0.903). The amount of information that appears to be discarded therefore depends strongly on whether the probe is linear or nonlinear.
+4. **Random-encoder baseline.** An untrained encoder of identical architecture yields distractor-position NMSE of 0.77–0.80 and agent-position NMSE of 0.90–0.92 at all levels, confirming that the decodable information is acquired through training.
+5. **Unresolved discrepancy.** For the 2-level model (Fig. 12), level-2 results agree with the paper, whereas level-1 distractor-position NMSE does not (0.156 vs ≈0.01).
+
+## Background and research question
+
+H-JEPA assesses what each level of its hierarchy encodes by training a probe on frozen latent representations. In the paper, higher levels retain the agent's position while progressively discarding information about distractors, which is interpreted as selective abstraction. All reported probing uses a single probe architecture (a one-hidden-layer MLP with 512 units).
+
+A probe measures what is *decodable* by that probe, not what is *present* in the representation. Information that a weak probe cannot recover may still be encoded, and a sufficiently strong probe may recover information that the downstream model does not use. This study therefore asks:
+
+> Does the conclusion that higher levels discard distractor information hold across probes of different capacity?
+
+## Method
+
+**Models.** Official H-JEPA FourRoom checkpoints with 2, 3 and 4 levels; all encoder parameters are frozen.
+
+**Probes.** The official probing configuration is used throughout (AdamW, learning rate 1e-3, weight decay 1e-4, batch size 128, 60 epochs, probe seed 42). Each probe has one hidden layer with LayerNorm and GELU; only the hidden width is varied:
+
+| Probe | Hidden width | Parameters |
+|---|---|---|
+| Linear | 0 | 386 |
+| MLP | 128 | 25k |
+| MLP (official) | 512 | 101k |
+| MLP | 2048 | 403k |
+
+**Targets.** Agent position (`xy`), position of a distractor (`distractor0_xy`), and geodesic distance from the agent to the nearest distractor (`min_distractor_dist`).
+
+**Metric.** Normalised mean squared error (NMSE) on the held-out evaluation split. NMSE = 1 corresponds to predicting the target mean; lower is better.
+
+**Controls.**
+- *Position-only control:* the official MLP-512 probe is trained on the ground-truth agent position and closed-door index instead of learned features. It measures how much of each target is predictable from the agent's position alone.
+- *Random-encoder baseline:* the 3-level architecture is instantiated with the official constructor but left untrained, and probed in the same way.
+
+**Implementation.** The following changes were made to `h_jepa/`:
+
+| Commit | Description |
+|---|---|
+| Make probe hidden_dim configurable | Adds `probe_hidden_dim` (0 = linear). The default of 512 preserves the original code path. |
+| Add cached-embedding probing runner | `main_probing_cached.py` evaluates the frozen encoder once, caches the embeddings, and trains the same probe heads with the same random-number sequence and metrics. |
+| Cached probing: optional random_init baseline | `+random_init=true` instantiates the same architecture without loading trained weights. |
+
+The cached runner was validated against the official pipeline: on the 3-level model (seed 42, MLP-512 probe), all 18 reported NMSE values are identical (maximum absolute difference 0; `probing/scripts/compare_metrics.py`).
+
+**Pre-registration.** Hypotheses for the capacity sweep were recorded in [`probing/PREREG.md`](probing/PREREG.md) before any full result was available.
 
 ## Results
 
-### 1. Paper Fig. 4: 4-level model, distractor position
+### Reproduction of Fig. 4 (4-level model, distractor position)
 
 | | L1 | L2 | L3 | L4 |
 |---|---|---|---|---|
-| paper (read from plot) | ≈0.06 ± 0.02 | ≈0.19 ± 0.05 | ≈0.37 ± 0.08 | ≈0.58 ± 0.07 |
-| this repo, 3 model seeds, mean ± SE | 0.053 ± 0.020 | 0.167 ± 0.050 | 0.340 ± 0.073 | 0.553 ± 0.072 |
+| Paper (read from figure) | ≈0.06 ± 0.02 | ≈0.19 ± 0.05 | ≈0.37 ± 0.08 | ≈0.58 ± 0.07 |
+| This work (3 model seeds, mean ± SE) | 0.053 ± 0.020 | 0.167 ± 0.050 | 0.340 ± 0.073 | 0.553 ± 0.072 |
 
-Agent position is near-perfect at every level (NMSE ≈ 1e-4), as in the paper.
+Agent-position NMSE is ≈1e-4 at all levels, as in the paper.
 
-### 2. Paper Fig. 12: 2-level model (seed 42)
+### Reproduction of Fig. 12 (2-level model, seed 42)
 
-| | agent L1 | agent L2 | distractor L1 | distractor L2 |
+| | Agent L1 | Agent L2 | Distractor L1 | Distractor L2 |
 |---|---|---|---|---|
-| paper | ≈0 | ≈0 | ≈0.01 | ≈0.33 ± 0.01 |
-| this repo | 4e-5 | 7e-5 | **0.156** | 0.341 |
+| Paper | ≈0 | ≈0 | ≈0.01 | ≈0.33 ± 0.01 |
+| This work | 4e-5 | 7e-5 | **0.156** | 0.341 |
 
-Level 2 matches; level-1 distractor error does not, and I have not found why. The Fig. 12 caption says probe heads differ between environments, so the probe used there may not be the one in the released config.
+Level-2 results agree with the paper; the level-1 distractor result does not. The caption of Fig. 12 states that probe heads differ across environments, so the probe used for this figure may differ from the released configuration. The cause has not been identified.
 
-### 3. Probe capacity: 3-level model (seed 42)
+### Probe capacity (3-level model, seed 42)
 
-The paper reports no probing for the 3-level model.
+The paper does not report probing results for the 3-level model.
 
-| probe (parameters) | distractor xy L1 / L2 / L3 | geodesic distance L1 / L2 / L3 | agent xy |
+| Probe | Distractor position L1 / L2 / L3 | Geodesic distance L1 / L2 / L3 | Agent position |
 |---|---|---|---|
-| linear (386) | 0.446 / 0.672 / 0.903 | 0.816 / 0.854 / 0.863 | 0.002–0.007 |
-| MLP 128 (25k) | 0.117 / 0.313 / 0.507 | 0.326 / 0.506 / 0.631 | ≈1e-4 |
-| MLP 512, official (101k) | 0.105 / 0.275 / 0.492 | 0.307 / 0.489 / 0.619 | ≈1e-4 |
-| MLP 2048 (403k) | 0.098 / 0.257 / 0.487 | 0.301 / 0.467 / 0.615 | ≈1e-4 |
+| Linear | 0.446 / 0.672 / 0.903 | 0.816 / 0.854 / 0.863 | 0.002–0.007 |
+| MLP-128 | 0.117 / 0.313 / 0.507 | 0.326 / 0.506 / 0.631 | ≈1e-4 |
+| MLP-512 (official) | 0.105 / 0.275 / 0.492 | 0.307 / 0.489 / 0.619 | ≈1e-4 |
+| MLP-2048 | 0.098 / 0.257 / 0.487 | 0.301 / 0.467 / 0.615 | ≈1e-4 |
+| Position-only control (MLP-512) | 0.981 | 0.873 | — |
 
-- Going from linear to 128 hidden units is the big step (level-3 distractor error falls by 0.40). Beyond 128 the probe saturates: level-3 values move by at most 0.02, less than the spread across model seeds (about 0.07 in Fig. 4).
-- The ordering L1 < L2 < L3 holds for every probe, so the Fig. 4 conclusion is robust to MLP width. With a linear probe, though, even level 1 looks like it has lost much of the distractor information.
-- The widest probe does not overfit: its train–eval gap (about 0.03) is the same as for the 512 probe.
-- This sweep uses a single model seed.
+- **Capacity.** The transition from a linear probe to MLP-128 reduces level-3 distractor NMSE by 0.40. Beyond width 128, level-3 NMSE changes by at most 0.02, which is smaller than the variation across model seeds observed in Fig. 4 (≈0.07).
+- **Level ordering.** NMSE increases from L1 to L3 for every probe, including the linear one.
+- **Overfitting.** The train–evaluation gap of MLP-2048 (≈0.03) matches that of MLP-512, indicating no additional overfitting.
+- **Control.** Learned representations achieve geodesic-distance NMSE of 0.30–0.63, well below the position-only control (0.873). They therefore encode distractor information beyond what follows from the agent's position.
 
-**Control: what can be predicted from the agent's position alone?** The same MLP512 probe trained on the true agent position plus the closed-door index (no learned features) gives distractor error 0.981 and geodesic-distance error 0.873. The learned features beat this by a wide margin (geodesic distance 0.31–0.62), so they carry real distractor information, not just a proxy through the agent's position.
+### Random-encoder baseline (3-level architecture, MLP-512 probe)
 
-### 4. Random-encoder baseline (3-level architecture, untrained, MLP512 probe)
-
-| eval NMSE L1 / L2 / L3 | agent xy | distractor xy | geodesic distance |
+| Evaluation NMSE, L1 / L2 / L3 | Agent position | Distractor position | Geodesic distance |
 |---|---|---|---|
-| random encoder | 0.904 / 0.919 / 0.906 | 0.773 / 0.777 / 0.797 | 0.993 / 0.995 / 0.996 |
-| trained H-JEPA | 5e-5 / 7e-5 / 7e-5 | 0.105 / 0.275 / 0.492 | 0.307 / 0.489 / 0.619 |
+| Untrained encoder | 0.904 / 0.919 / 0.906 | 0.773 / 0.777 / 0.797 | 0.993 / 0.995 / 0.996 |
+| Trained H-JEPA | 5e-5 / 7e-5 / 7e-5 | 0.105 / 0.275 / 0.492 | 0.307 / 0.489 / 0.619 |
 
-Random features carry little information, and it does not change across levels, so stacking levels does not by itself remove information. Training makes the agent position near-perfect at every level and the distractor readable at level 1. At higher levels distractor error moves back toward the random-encoder value but stays below it, so the drop is partial.
+Untrained features are only weakly informative and show no level dependence, indicating that stacking levels does not by itself remove information. After training, agent position is decodable at every level, and distractor information is largely decodable at L1. At higher levels distractor NMSE approaches, but remains below, the untrained baseline, so the reduction is partial rather than complete.
 
-## Pre-registration
+### Outcome of pre-registered hypotheses
 
-Before seeing any full result of the capacity sweep, I wrote down expectations in [`probing/PREREG.md`](probing/PREREG.md). How they turned out:
-
-| | Expectation | Outcome |
+| | Hypothesis | Outcome |
 |---|---|---|
-| H1 | agent position decodable at every capacity; linear clearly worse; MLPs saturated | **confirmed** |
-| H2 | distractor position stays ≈1.0 at every capacity ("absent from the latent") | **rejected**: 0.10–0.49 with MLP probes |
-| H3 | geodesic distance is mostly explained by agent position (latent ≈ control) | **rejected**: latent 0.30–0.62 vs control 0.873 |
-| H4 | if the widest probe improves train but not eval, count it as "not decodable" | not triggered: train–eval gap unchanged |
+| H1 | Agent position is decodable at all capacities; the linear probe is clearly worse; MLP probes saturate | Supported |
+| H2 | Distractor position remains at NMSE ≈ 1.0 at all capacities | Not supported (0.10–0.49 for MLP probes) |
+| H3 | Geodesic distance is explained mainly by agent position (latent ≈ control) | Not supported (0.30–0.62 vs 0.873) |
+| H4 | If MLP-2048 improves training but not evaluation NMSE, the target is treated as not decodable | Not triggered |
 
-H2 and H3 were wrong: the features hold more distractor information than I expected.
+The representations contain more distractor information than was anticipated in H2 and H3.
 
-## Reproduce
+## Discussion
+
+Within the MLP family, the qualitative conclusion of the paper is robust: distractor information becomes progressively less decodable at higher levels, and this ordering does not depend on probe width beyond 128 units. The absolute amount of information that appears to be discarded, however, depends strongly on probe class. A linear probe would suggest that even the first level discards most distractor information, whereas nonlinear probes show that it remains largely recoverable. Statements about what a level "discards" should therefore specify the probe used.
+
+## Limitations
+
+- All probes use a single probe seed (42), following the official configuration.
+- The capacity sweep and the Fig. 12 reproduction use a single model seed (42).
+- The Fig. 12 level-1 discrepancy is unresolved.
+- FourRoom contains no fast-changing proprioceptive variables. The broader claim that higher levels discard fast variables (e.g. leg pose) while retaining position requires evaluation in an embodied environment such as Ant, which H-JEPA also provides.
+
+## Reproducibility
 
 ```bash
-# 1. environment and data: follow UPSTREAM_README.md (uv, Python 3.11); then
+# Environment and data: follow UPSTREAM_README.md (uv, Python 3.11)
 export HJEPA_HOME=/path/to/data
 
-# 2. the HF checkpoints ship without the training config the probe script needs; recreate it, e.g.
+# The released checkpoints do not include the training config required by the probing script;
+# recreate it for each checkpoint, e.g.
 python probing/scripts/make_train_config.py h_jepa/config/train fourroom_hjepa_l3 42 \
     $HJEPA_HOME/ckpts/fourroom/fourroom_hjepa_l3/seed42/config.yaml
 
-# 3. one probing run: <model> <model seed> <probe hidden width>
+# Single run: <model> <model seed> <probe hidden width>
 bash probing/scripts/run_probe.sh l3 42 512
 
-# all runs in this document, sequentially
+# All runs reported above, executed sequentially
 bash probing/scripts/sweep.sh
 
-# 4. the agent-position-only control
+# Position-only control
 python probing/scripts/xy_only_control.py
 ```
 
-`probing/results/` holds the `metrics.yaml` of every run reported here. The linear-probe row for the 3-level model comes from the official pipeline (`results/C_h0`); the other capacity rows come from the cached runner.
+`probing/results/` contains the `metrics.yaml` of every reported run. The linear-probe results for the 3-level model were produced with the official pipeline (`probing/results/C_h0`); all other capacity results were produced with the cached runner.
 
-## Notes
+**Environment.** NVIDIA RTX 4080 Laptop GPU (12 GB) under WSL2; Python 3.11; PyTorch 2.7.1 (CUDA 12.6 build, as the CUDA 12.8 index named upstream was unreachable). Concurrent CUDA processes caused driver faults on this system, so all runs were executed sequentially; `run_probe.sh` retries a failed run up to three times.
 
-- On the test machine (laptop GPU under WSL2), running two CUDA processes at once crashed reliably (Windows logged `nvlddmkm` "Graphics FECS Exception" events at the crash times). All runs here were sequential, and `run_probe.sh` retries a failed run up to 3 times.
-- The torch build is cu126 rather than the cu128 the upstream README names, because the official wheel index was unreachable from the test machine.
+## Citation
 
-## Next steps
-
-- FourRoom has no fast-changing body variables such as leg pose. Testing the claim "higher levels drop fast variables like leg pose but keep position" needs an embodied environment (H-JEPA also ships Ant).
-
-## Acknowledgements
-
-All model and training code is by the H-JEPA authors. If you use it, please cite:
+The model and training code are by the H-JEPA authors. Please cite the original work:
 
 ```bibtex
 @article{zhang2026hjepa,
@@ -140,4 +168,4 @@ All model and training code is by the H-JEPA authors. If you use it, please cite
 
 ## License
 
-MIT, inherited from upstream. See [LICENSE](LICENSE).
+MIT, inherited from the upstream repository. See [LICENSE](LICENSE).
