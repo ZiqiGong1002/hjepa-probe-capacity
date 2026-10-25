@@ -38,3 +38,10 @@ h_jepa/unit_tests/
 
 # previous README, kept for local reference
 /README_old.md
+
+# --- added for the probing fork: never commit data, checkpoints or raw run logs ---
+*.ckpt
+*.pt
+*.h5
+probing/results/**/*.log
+probing/results/**/config.yaml
