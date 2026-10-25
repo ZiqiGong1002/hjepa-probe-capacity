@@ -1,381 +1,133 @@
-<h1 align="center">
-    <p><b>H-JEPA: End-to-End Learning of Hierarchical World Models for Visual Planning</b></p>
-</h1>
+# H-JEPA FourRoom probing: reproduction and probe-capacity study
 
-<div align="center" style="line-height: 1;">
-  <a href="https://arxiv.org/abs/2610.06805" target="_blank" style="margin: 2px;"><img alt="ArXiv" src="https://img.shields.io/badge/arXiv-2610.06805-b5212f?logo=arxiv" style="display: inline-block; vertical-align: middle;"/></a>
-  <a href="https://h-jepa.com/" target="_blank" style="margin: 2px;"><img alt="Website" src="https://img.shields.io/badge/Website-h--jepa.com-blue" style="display: inline-block; vertical-align: middle;"/></a>
-  <a href="https://huggingface.co/datasets/jepa-world-models/h-jepa" target="_blank" style="margin: 2px;"><img alt="HuggingFace Dataset" src="https://img.shields.io/badge/🤗%20Dataset-jepa--world--models/h--jepa-ffc107" style="display: inline-block; vertical-align: middle;"/></a>
-  <a href="https://huggingface.co/jepa-world-models/h-jepa" target="_blank" style="margin: 2px;"><img alt="HuggingFace Models" src="https://img.shields.io/badge/🤗%20Models-jepa--world--models/h--jepa-ffc107" style="display: inline-block; vertical-align: middle;"/></a>
-</div>
+[中文版](README.zh-CN.md) · [Original upstream README](UPSTREAM_README.md)
 
-<br>
+[H-JEPA](https://arxiv.org/abs/2610.06805) reads off what each level of its hierarchy remembers by training a small probe network on frozen features. Its Fig. 4 concludes that higher levels keep the agent's position but progressively drop information about distractors ("selective abstraction"). The paper uses a single probe architecture (an MLP with 512 hidden units). This study asks whether that conclusion depends on how strong the probe is.
 
-<p align="center">
-  Wancong Zhang*,
-  Basile Terver*,
-  Mike Rabbat,
-  Yann LeCun&dagger;,
-  Randall Balestriero&dagger;
-</p>
+- **Upstream:** [kevinghst/H-JEPA](https://github.com/kevinghst/H-JEPA) at commit `97054ec` (MIT). Official FourRoom checkpoints from Hugging Face, sha256 verified.
+- **My changes:** three commits on top of upstream (`git log 97054ec..HEAD -- h_jepa`), plus `probing/` and this README (the original is kept as [`UPSTREAM_README.md`](UPSTREAM_README.md)).
+- **Not included:** datasets and checkpoints (download them as described in [`UPSTREAM_README.md`](UPSTREAM_README.md)).
 
-<p align="center">
-  <b>AMI Labs</b>, NYU, INRIA Paris, Brown University<br>
-  <sub>* equal contribution, &dagger; equal advising</sub>
-</p>
+## TL;DR
 
-<p align="center">
-  <a href="assets/teaser-video.mp4">
-    <img src="assets/teaser.gif" alt="Animated H-JEPA planning illustration in Visual AntMaze, with decoded subgoals at three levels and planning success versus compute. Click for the MP4 video." width="800">
-  </a>
-</p>
+1. **Fig. 4 reproduces.** On the 4-level model over 3 model seeds, distractor-position error per level is 0.053 / 0.167 / 0.340 / 0.553, against roughly 0.06 / 0.19 / 0.37 / 0.58 read from the paper's plot.
+2. **The layer-wise trend holds for MLP probes of any tested width.** On the 3-level model, distractor error rises from level 1 to level 3 for MLP probes with 128, 512 and 2048 hidden units, and widths above 128 change the numbers by at most 0.02.
+3. **A linear probe gives a much weaker picture.** With a linear probe, distractor error is 0.45 / 0.67 / 0.90, so how much information appears "dropped" depends strongly on the probe class.
+4. **The information comes from training.** A randomly initialised encoder with the same architecture gives distractor error around 0.78 at every level and agent-position error around 0.91.
+5. **One mismatch remains.** For the 2-level model (Fig. 12), level 2 matches the paper but level 1 does not (0.156 vs about 0.01). The cause is unknown.
 
----
+## Setup
 
-H-JEPA learns a hierarchy of action-conditioned JEPA world models end-to-end, with each level predicting farther ahead
-in its own learned latent space.
-Hierarchical planning with H-JEPA proceeds top-down: the top level optimizes progress toward the goal, and each level's predictions become subgoals for the level below.
-On Visual AntMaze, a three-level H-JEPA achieves **73.3%** planning success against **18.0%** using the flat [LeWorldModel](https://arxiv.org/abs/2603.19312), with a fraction of planner compute.
+- **Model:** official H-JEPA FourRoom checkpoints (2, 3 and 4 levels), frozen.
+- **Probe:** official probing config: AdamW, lr 1e-3, weight decay 1e-4, batch 128, 60 epochs, probe seed 42. One hidden layer with LayerNorm and GELU; only the hidden width changes (0 = linear).
+- **Targets:** agent position (`xy`), distractor position (`distractor0_xy`), geodesic distance to the nearest distractor (`min_distractor_dist`).
+- **Metric:** normalised MSE (NMSE) on the evaluation split. 1.0 means no better than predicting the mean; lower is better.
+- **Hardware:** RTX 4080 Laptop GPU 12 GB, WSL2. Python 3.11, torch 2.7.1+cu126.
 
-This repository contains the training and planning code for H-JEPA. It supports Visual AntMaze,
-FourRoom Distractors, OGBench Cube, Push-T, and offline planning on DROID. It contains scripts to reproduce
-Figure 6 (bottom row), Tables 1 and 9, and Figure 9(b)
-of the [H-JEPA paper](https://arxiv.org/abs/2610.06805).
-It is built on [LeWM](https://github.com/lucas-maes/le-wm) and
-[stable-worldmodel](https://github.com/galilai-group/stable-worldmodel).
+### Code changes (in `h_jepa/`)
 
-## 1) Installation
+| Commit | Change |
+|---|---|
+| Make probe hidden_dim configurable | `probe_hidden_dim` option; `0` = linear; default 512 keeps the original code path |
+| Add cached-embedding probing runner | `main_probing_cached.py`: runs the frozen encoder once and caches its outputs, then trains the same probe heads with the same RNG sequence and metrics. |
+| Cached probing: optional random_init baseline | `+random_init=true` builds the same architecture untrained, via the official constructor |
 
-```bash
-git clone https://github.com/kevinghst/H-JEPA.git && cd H-JEPA
-conda create -n hjepa python=3.11.13 && conda activate hjepa
-pip install -e ".[train,env]" --extra-index-url https://download.pytorch.org/whl/cu128
-export HJEPA_HOME=/path/to/data   # datasets, expert policies and checkpoints live here
-```
+**Check that the cached runner is faithful:** on the 3-level model (seed 42, MLP512 probe), all 18 NMSE values from the cached runner equal the official pipeline's exactly (max difference 0). See `probing/scripts/compare_metrics.py`.
 
-**Choose your workflow:**
+## Results
 
-- **[Train and evaluate on Visual AntMaze](#2-run-h-jepa)** — start with a concrete example.
-- **[Reproduce the paper's simulation results](#3-reproducing-push-t-ogbench-cube-visual-antmaze-fourroom)**
-- **[Reproduce the paper's DROID results](#4-reproducing-droid)**
+### 1. Paper Fig. 4: 4-level model, distractor position
 
-## 2) Run H-JEPA
+| | L1 | L2 | L3 | L4 |
+|---|---|---|---|---|
+| paper (read from plot) | ≈0.06 ± 0.02 | ≈0.19 ± 0.05 | ≈0.37 ± 0.08 | ≈0.58 ± 0.07 |
+| this repo, 3 model seeds, mean ± SE | 0.053 ± 0.020 | 0.167 ± 0.050 | 0.340 ± 0.073 | 0.553 ± 0.072 |
 
-Run commands from `h_jepa/` unless noted (`cd h_jepa` after installation).
+Agent position is near-perfect at every level (NMSE ≈ 1e-4), as in the paper.
 
-### 2.1) Training
+### 2. Paper Fig. 12: 2-level model (seed 42)
 
-Train three-level H-JEPA on Visual AntMaze with seed 42. First prepare the
-[AntMaze datasets](#31-datasets), including the probing files, and [evaluation tasks](#32-evaluation-tasks).
+| | agent L1 | agent L2 | distractor L1 | distractor L2 |
+|---|---|---|---|---|
+| paper | ≈0 | ≈0 | ≈0.01 | ≈0.33 ± 0.01 |
+| this repo | 4e-5 | 7e-5 | **0.156** | 0.341 |
 
-```bash
-python main_hjepa.py --config-name ant_hjepa_l3 seed=42
-```
+Level 2 matches; level-1 distractor error does not, and I have not found why. The Fig. 12 caption says probe heads differ between environments, so the probe used there may not be the one in the released config.
 
-Training configs follow `<env>_<model>`; see the [model/config tables](#5-configuration-reference) for other choices.
+### 3. Probe capacity: 3-level model (seed 42)
 
-Training automatically runs planning evaluation at the end.
+The paper reports no probing for the 3-level model.
 
-Runs write to `$HJEPA_HOME/ckpts/<env>/<env>_<model>/seed<seed>/`:
-
-- `<env>_<model>_object.ckpt`, `config.yaml`, logs and the stable-pretraining cache `spt/`;
-- `planning_eval/epoch_XXXX/metrics.yaml`: final planning eval with the matching planner and model seed;
-- `final_probing_decoding_eval/`: frozen-model probes and decoders (`config/probing/<env>.yaml`).
-
-### 2.2) Standalone planning evaluation
-
-Use this to evaluate a pretrained checkpoint or rerun evaluation with different planner settings.
-
-Here we evaluate the three-level H-JEPA model from above using three-level hierarchical planning on Visual AntMaze. Prepare the
-[evaluation tasks](#32-evaluation-tasks) and either train the model or
-[download its checkpoint](#34-pretrained-checkpoints-optional) first.
-
-```bash
-python eval.py --config-name ant_l3 seed=42 output.dir=eval_l3 \
-  policy="$HJEPA_HOME/ckpts/ant/ant_hjepa_l3/seed42/ant_hjepa_l3_object.ckpt"
-```
-
-Results are saved beside the checkpoint in `eval_l3/metrics.yaml`; `success_rate` is reported as a percentage.
-Completed tasks are skipped on rerun. Use a new `output.dir` when changing planner settings.
-
-For cluster training and evaluation, see [Running on SLURM](docs/SLURM.md).
-
-## 3) Reproducing Push-T, OGBench Cube, Visual AntMaze, FourRoom
-
-Reproduces the bottom row of Figure 6 and the level-1 columns of Tables 1 and 9.
-Results report paper success rates
-(%, mean ± SE over seeds 42, 43, 44; planner seed = model seed).
-**For evaluation only, download [tasks](#32-evaluation-tasks) and [checkpoints](#34-pretrained-checkpoints-optional);
-datasets are needed for training and probing.**
-
-### 3.1) Datasets
-
-The datasets are HDF5 files under `$HJEPA_HOME`.
-
-| Environment | Files | Source |
-|---|---|---|
-| Push-T | `pusht_expert_train.h5`, `pusht_expert_val.h5` | download (LeWM + HF) |
-| OGBench Cube | `cube_single_expert_train.h5`, `cube_single_expert_val.h5` | download (LeWM) + split |
-| Visual AntMaze | `visual_antmaze_medium_{explore_stitch_train,stitch_val,probing_train,probing_eval}.h5` | download (HF) or generate |
-| FourRoom Distractors | `fourroom_tp35_d1{,_val,_probing,_probing_val}.h5` | download (HF) or generate |
-
-**Push-T and Cube.** The training data is LeWM's release
-([`quentinll/lewm-pusht`](https://huggingface.co/datasets/quentinll/lewm-pusht),
-[`quentinll/lewm-cube`](https://huggingface.co/datasets/quentinll/lewm-cube), MIT). The Push-T
-validation set is in our release. From the repository root:
-
-```bash
-hf download quentinll/lewm-pusht --repo-type dataset --local-dir $HJEPA_HOME --include "*.zst"
-hf download quentinll/lewm-cube --repo-type dataset --local-dir $HJEPA_HOME --include "*.zst"
-hf download jepa-world-models/h-jepa pusht_expert_val.h5 --repo-type dataset --local-dir $HJEPA_HOME
-unzstd $HJEPA_HOME/pusht_expert_train.h5.zst
-tar -I unzstd -xf $HJEPA_HOME/cube_single_expert.tar.zst -C $HJEPA_HOME
-python scripts/data/add_pusht_block_ori.py "$HJEPA_HOME/pusht_expert_train.h5"  # add block_ori for probing
-python scripts/data/split_cube.py  # first 9,800 episodes for training; last 200 for validation
-```
-
-**Visual AntMaze and FourRoom Distractors.** Download the eight files from
-[`jepa-world-models/h-jepa`](https://huggingface.co/datasets/jepa-world-models/h-jepa):
-
-```bash
-hf download jepa-world-models/h-jepa --repo-type dataset --local-dir $HJEPA_HOME \
-  --include "visual_antmaze_medium_*" --include "fourroom_tp35_d1*" --include SHA256SUMS
-(cd "$HJEPA_HOME" && sha256sum -c --ignore-missing SHA256SUMS)
-```
-
-<details>
-<summary>Optional: collect AntMaze and FourRoom datasets</summary>
-
-From the repository root:
-
-```bash
-bash scripts/data/collect_datasets.sh
-```
-
-Uses the matching configs in `scripts/data/config/`. AntMaze requires the
-[OGBench](https://github.com/seohongpark/ogbench) ant expert policy in `$HJEPA_HOME/ogbench_experts/ant/`:
-
-```bash
-mkdir -p $HJEPA_HOME/ogbench_experts
-wget -qO- https://rail.eecs.berkeley.edu/datasets/ogbench/experts.tar.gz \
-  | tar xz -C $HJEPA_HOME/ogbench_experts --strip-components=1 experts/ant
-```
-
-FourRoom collection reproduced the downloads in our checks. AntMaze follows the same distribution
-but is not byte-identical because some reset randomness is unseeded. Its downloaded training set
-contains 12,500 explore + 12,500 stitch episodes (the seed-42 paper training data), with only training
-columns; collected files include extra columns. Probing evaluation uses 155 explore + 155 stitch episodes.
-
-</details>
-
-### 3.2) Evaluation tasks
-
-Each environment has a fixed set of 50 start/goal tasks under `h_jepa/assets/eval_trajs/`.
-From `h_jepa/`, download them from
-[`jepa-world-models/h-jepa`](https://huggingface.co/datasets/jepa-world-models/h-jepa):
-
-```bash
-hf download jepa-world-models/h-jepa --repo-type dataset --local-dir assets --include "eval_trajs/*"
-(cd assets/eval_trajs && sha256sum -c SHA256SUMS)
-```
-
-<details>
-<summary>Optional: regenerate evaluation tasks</summary>
-
-```bash
-# Visual AntMaze: start/goal cells 3 grid cells apart, reached by the expert policy
-# (needs the OGBench ant expert in $HJEPA_HOME/ogbench_experts/ant/, see 3.1)
-python scripts/generate_maze_expert_grid_eval_tasks.py --config-name ant_flat \
-  --output-path assets/eval_trajs/ant/expert_grid_d3_n50.pt \
-  --d-low 3 --d-high 3 --num-episodes 50 --rollout-budget 125 --seed 42
-
-# FourRoom Distractors: writes one file per active-distractor count; the evals use _d1
-# (no dataset needed)
-python scripts/generate_fourroom_eval_tasks.py \
-  --data-config-path ../scripts/data/config/fourroom_tp35_d0to5.yaml \
-  --output-dir assets/eval_trajs/fourroom --output-stem fourroom_tp35 \
-  --cross-n-rooms 2 --max-steps 75 --num-episodes 50
-
-# OGBench Cube: 20-step windows centred on the grasp, from the val split
-# (needs cube_single_expert_val.h5, see 3.1)
-python scripts/generate_dataset_eval_trajs.py --config-name cube_flat \
-  --dataset-name cube_single_expert_val --traj-sampling-mode cube_pickup_centered \
-  --goal-offset-steps 20 --eval-budget 50 --seed 42 \
-  --output-path assets/eval_trajs/ogbench/goal_offset_20_pickup_val.pt
-
-# Push-T: 75-step windows from the val split, stratified over episodes
-# (needs pusht_expert_val.h5, see 3.1)
-python eval.py --config-name pusht_flat policy=random load_eval_trajs_path=null \
-  eval.goal_offset_steps=75 eval.dataset_name=pusht_expert_val seed=42 \
-  dump_eval_trajs_path=assets/eval_trajs/pusht/goal_offset_75_val.pt
-```
-
-</details>
-
-### 3.3) Training
-
-Train all 4 environments × 7 models × 3 seeds (84 runs):
-
-```bash
-scripts/train_all.sh
-```
-
-Runs are sequential. Filter with `ENVS`, `MODELS`, `SEEDS`, e.g.
-`ENVS=cube MODELS="lewm hjepa_l3" SEEDS=42 scripts/train_all.sh`, or submit each training command
-as a separate cluster job. Outputs follow §2.1.
-
-### 3.4) Pretrained checkpoints (optional)
-
-To skip training (§3.3), download all 84 trained models (4 environments × 7 models × 3 seeds, 9.7 GB) from
-[`jepa-world-models/h-jepa`](https://huggingface.co/jepa-world-models/h-jepa)
-(the DROID models are in §4.3):
-
-```bash
-hf download jepa-world-models/h-jepa --local-dir $HJEPA_HOME/ckpts --exclude "droid/*"
-# one environment only: --include "cube/*" instead of --exclude; one seed: add --include "*/seed42/*"
-```
-
-Checkpoints and `normalizer.pt` use the training layout (§2.1), ready for the eval scripts below.
-
-### 3.5) Depth comparison (Figure 6)
-
-First complete [training (§3.3)](#33-training) or [download pretrained checkpoints (§3.4)](#34-pretrained-checkpoints-optional),
-and prepare the [evaluation tasks (§3.2)](#32-evaluation-tasks). Trained and downloaded checkpoints use the same directory layout expected by this script.
-
-Training runs this eval automatically; to evaluate saved checkpoints:
-
-```bash
-scripts/eval_depth.sh
-```
-
-Results are saved next to each checkpoint in `eval_<planner>/metrics.yaml`.
-Both this script and the cost-ladder script accept `ENVS` and `SEEDS` filters.
-Each requires all relevant model checkpoints for the selected environments and seeds; neither accepts a `MODELS` filter.
-For a single checkpoint, use [standalone evaluation (§2.2)](#22-standalone-planning-evaluation).
-
-See the [expected results reported in the paper](docs/RESULTS.md#depth-comparison-figure-6).
-
-### 3.6) Cost ladder (Tables 1 and 9)
-
-First complete [training (§3.3)](#33-training) or [download pretrained checkpoints (§3.4)](#34-pretrained-checkpoints-optional),
-and prepare the [evaluation tasks (§3.2)](#32-evaluation-tasks).
-
-Evaluate each H-JEPA model with level-1 planning and either native or projected cost:
-
-```bash
-scripts/eval_cost_ladder.sh
-```
-
-Results go beside each checkpoint in `eval_flat/metrics.yaml` (native L1) and
-`eval_l<k>_project/metrics.yaml` (level-k cost, k = 2 … model depth).
-
-See the [expected results reported in the paper](docs/RESULTS.md#cost-ladder-tables-1-and-9).
-
-## 4) Reproducing DROID
-
-Evaluate open-loop planning on real-robot videos from DROID. Plans are scored against recorded expert trajectories;
-this evaluation measures trajectory fidelity, not closed-loop task success.
-
-Reproduces Figure 9(b).
-**For evaluation only, download the [evaluation clips](#41-data) (252 MB) and
-[checkpoints](#43-pretrained-checkpoints-optional); the 91 GB training set is needed for training only.**
-
-### 4.1) Data
-
-Download DROID data to `$HJEPA_HOME/droid/` ([dataset details and license](https://huggingface.co/datasets/jepa-world-models/h-jepa)).
-
-**Evaluation clips.** The 16 evaluation episodes, raw 1280×720 in `droid_raw/1.0.1/`:
-
-```bash
-hf download jepa-world-models/h-jepa --repo-type dataset --local-dir $HJEPA_HOME \
-  --include droid/droid_raw_eval16.tar --include droid/SHA256SUMS
-(cd $HJEPA_HOME/droid && sha256sum -c --ignore-missing SHA256SUMS && tar -xf droid_raw_eval16.tar)
-```
-
-**Training data.** 91 GB of tar shards, re-encoded at 256×256 in `droid_256p/1.0.1/`:
-
-```bash
-hf download jepa-world-models/h-jepa --repo-type dataset --local-dir $HJEPA_HOME --include "droid/*"
-bash $HJEPA_HOME/droid/extract.sh    # checks SHA256SUMS, untars all shards; --delete drops the tars
-```
-
-Models train at 5 fps on 74,896 episodes, excluding the 16 evaluation clips, with 64 validation episodes.
-
-### 4.2) Training
-
-Train 3 models × 3 seeds (1, 1000, 10000), for 9 runs:
-
-```bash
-ENVS=droid scripts/train_all.sh
-```
-
-| Config | Model | GPUs × batch | Epochs |
+| probe (parameters) | distractor xy L1 / L2 / L3 | geodesic distance L1 / L2 / L3 | agent xy |
 |---|---|---|---|
-| `droid_lewm` | flat LeWM + IDM | 2 × 128 | 100 |
-| `droid_hwm_l2` | HWM: identity level 2, trained end-to-end | 2 × 128 | 100 |
-| `droid_hjepa_l2` | H-JEPA: latent-MLP level 2, trained end-to-end | 2 × 128 | 100 |
+| linear (386) | 0.446 / 0.672 / 0.903 | 0.816 / 0.854 / 0.863 | 0.002–0.007 |
+| MLP 128 (25k) | 0.117 / 0.313 / 0.507 | 0.326 / 0.506 / 0.631 | ≈1e-4 |
+| MLP 512, official (101k) | 0.105 / 0.275 / 0.492 | 0.307 / 0.489 / 0.619 | ≈1e-4 |
+| MLP 2048 (403k) | 0.098 / 0.257 / 0.487 | 0.301 / 0.467 / 0.615 | ≈1e-4 |
 
-Each epoch is 292 steps. Run inside a SLURM allocation with 2 GPUs and 2 tasks per node:
-the script uses `srun --ntasks-per-node=2 python main_hjepa.py --config-name droid_<model> seed=<seed>`.
-Alternatively, submit each command separately. `MODELS` and `SEEDS` filter runs.
+- Going from linear to 128 hidden units is the big step (level-3 distractor error falls by 0.40). Beyond 128 the probe saturates: level-3 values move by at most 0.02, less than the spread across model seeds (about 0.07 in Fig. 4).
+- The ordering L1 < L2 < L3 holds for every probe, so the Fig. 4 conclusion is robust to MLP width. With a linear probe, though, even level 1 looks like it has lost much of the distractor information.
+- The widest probe does not overfit: its train–eval gap (about 0.03) is the same as for the 512 probe.
+- This sweep uses a single model seed.
 
-Outputs follow §2.1, with snapshots `droid_<model>_epoch_<N>_object.ckpt` every `save_every_n_epochs`.
+**Control: what can be predicted from the agent's position alone?** The same MLP512 probe trained on the true agent position plus the closed-door index (no learned features) gives distractor error 0.981 and geodesic-distance error 0.873. The learned features beat this by a wide margin (geodesic distance 0.31–0.62), so they carry real distractor information, not just a proxy through the agent's position.
 
-### 4.3) Pretrained checkpoints (optional)
+### 4. Random-encoder baseline (3-level architecture, untrained, MLP512 probe)
 
-To skip training (§4.2), download the 9 trained models (3 models × 3 seeds, 2.7 GB) from
-[`jepa-world-models/h-jepa`](https://huggingface.co/jepa-world-models/h-jepa):
+| eval NMSE L1 / L2 / L3 | agent xy | distractor xy | geodesic distance |
+|---|---|---|---|
+| random encoder | 0.904 / 0.919 / 0.906 | 0.773 / 0.777 / 0.797 | 0.993 / 0.995 / 0.996 |
+| trained H-JEPA | 5e-5 / 7e-5 / 7e-5 | 0.105 / 0.275 / 0.492 | 0.307 / 0.489 / 0.619 |
+
+Random features carry little information, and it does not change across levels, so stacking levels does not by itself remove information. Training makes the agent position near-perfect at every level and the distractor readable at level 1. At higher levels distractor error moves back toward the random-encoder value but stays below it, so the drop is partial.
+
+## Pre-registration
+
+Before seeing any full result of the capacity sweep, I wrote down expectations in [`probing/PREREG.md`](probing/PREREG.md). How they turned out:
+
+| | Expectation | Outcome |
+|---|---|---|
+| H1 | agent position decodable at every capacity; linear clearly worse; MLPs saturated | **confirmed** |
+| H2 | distractor position stays ≈1.0 at every capacity ("absent from the latent") | **rejected**: 0.10–0.49 with MLP probes |
+| H3 | geodesic distance is mostly explained by agent position (latent ≈ control) | **rejected**: latent 0.30–0.62 vs control 0.873 |
+| H4 | if the widest probe improves train but not eval, count it as "not decodable" | not triggered: train–eval gap unchanged |
+
+H2 and H3 were wrong: the features hold more distractor information than I expected.
+
+## Reproduce
 
 ```bash
-hf download jepa-world-models/h-jepa --local-dir $HJEPA_HOME/ckpts --include "droid/*"
-# one model only: --include "droid/droid_hjepa_l2/*"; one seed: --include "droid/*/seed1/*"
+# 1. environment and data: follow UPSTREAM_README.md (uv, Python 3.11); then
+export HJEPA_HOME=/path/to/data
+
+# 2. the HF checkpoints ship without the training config the probe script needs; recreate it, e.g.
+python probing/scripts/make_train_config.py h_jepa/config/train fourroom_hjepa_l3 42 \
+    $HJEPA_HOME/ckpts/fourroom/fourroom_hjepa_l3/seed42/config.yaml
+
+# 3. one probing run: <model> <model seed> <probe hidden width>
+bash probing/scripts/run_probe.sh l3 42 512
+
+# all runs in this document, sequentially
+bash probing/scripts/sweep.sh
+
+# 4. the agent-position-only control
+python probing/scripts/xy_only_control.py
 ```
 
-`droid_<model>_object.ckpt` (the epoch-100 model) and `normalizer.pt` use the training layout (§4.2),
-without the epoch snapshots, ready for the eval script below.
+`probing/results/` holds the `metrics.yaml` of every run reported here. The linear-probe row for the 3-level model comes from the official pipeline (`results/C_h0`); the other capacity rows come from the cached runner.
 
-### 4.4) Planning evaluation
+## Notes
 
-First complete [training (§4.2)](#42-training) or [download pretrained checkpoints (§4.3)](#43-pretrained-checkpoints-optional),
-and prepare the [evaluation clips (§4.1)](#41-data). Trained and downloaded checkpoints use the same directory layout expected by this script.
+- On the test machine (laptop GPU under WSL2), running two CUDA processes at once crashed reliably (Windows logged `nvlddmkm` "Graphics FECS Exception" events at the crash times). All runs here were sequential, and `run_probe.sh` retries a failed run up to 3 times.
+- The torch build is cu126 rather than the cu128 the upstream README names, because the official wheel index was unreachable from the test machine.
 
-Plan each clip start → goal in one open-loop call and score against ground-truth actions.
-Evaluate all models with planner seeds 1, 2, 3, writing `eval_{flat,l2}/plan_seed<ps>/eval.csv` beside
-each checkpoint and printing mean ± SE per model (filter with `MODELS`, `SEEDS`, `PLAN_SEEDS`):
+## Next steps
 
-```bash
-scripts/eval_droid.sh
-```
+- FourRoom has no fast-changing body variables such as leg pose. Testing the claim "higher levels drop fast variables like leg pose but keep position" needs an embodied environment (H-JEPA also ships Ant).
 
-For standalone evaluation, adapt the [command in §2.2](#22-standalone-planning-evaluation)
-to your DROID checkpoint, using `droid_flat` for LeWM or `droid_l2` for HWM and H-JEPA.
+## Acknowledgements
 
-Fréchet fidelity measures how closely the planned end-effector path follows the expert trajectory:
-0% corresponds to zero motion, and 100% to an exact match. The `frechet/skill_mean` column in `eval.csv`
-reports mean fidelity across the 16 clips; multiply by 100 to express it as a percentage.
-
-See the [expected results reported in the paper](docs/RESULTS.md#droid-planning-figure-9b).
-
-## 5) Configuration reference
-
-See [ARCHITECTURE.md](h_jepa/ARCHITECTURE.md) for model and planner internals.
-Configs use `<env>` = `ant`, `fourroom`, `cube`, `pusht` or `droid`.
-The simulation environments support the options below. DROID supports models `lewm`, `hjepa_l2` and `hwm_l2`,
-with planners `flat` for LeWM and `l2` for H-JEPA/HWM.
-
-| Model (`config/train/<env>_<model>.yaml`) | Description |
-|---|---|
-| `lewm` | Flat LeWM (one level) |
-| `hjepa_l2`, `hjepa_l3`, `hjepa_l4` | End-to-end H-JEPA with 2/3/4 levels |
-| `hwm_l2`, `hwm_l3`, `hwm_l4` | HWM: identity upper encoders, no upper-level SIGReg |
-
-| Planner (`config/eval/<env>_<planner>.yaml`) | Description |
-|---|---|
-| `flat` | Level-1 planning |
-| `l2`, `l3`, `l4` | Hierarchical planning for H-JEPA and HWM |
-| `l2_project`, `l3_project`, `l4_project` | Level-1 planning with cost in the level-2/3/4 latent |
-
-## 6) Citation
+All model and training code is by the H-JEPA authors. If you use it, please cite:
 
 ```bibtex
 @article{zhang2026hjepa,
@@ -386,6 +138,6 @@ with planners `flat` for LeWM and `l2` for H-JEPA/HWM.
 }
 ```
 
-## 7) License
+## License
 
-MIT (see `LICENSE`).
+MIT, inherited from upstream. See [LICENSE](LICENSE).
