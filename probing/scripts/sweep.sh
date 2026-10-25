@@ -15,6 +15,8 @@ l3 42 0
 l3 42 128
 l3 42 512
 l3 42 2048
+l4 42 128
+l4 42 2048
 JOBS
 # random-encoder baseline: untrained l3 architecture, official MLP512 probe
 OUT=$REPO/probing/results/F_random/l3_s42_h512 $RUN l3 42 512 +random_init=true
