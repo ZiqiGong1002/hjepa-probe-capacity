@@ -227,6 +227,7 @@ class FinalProbeDecodeHeads(nn.Module):
                     self.probers[name] = build_prober(
                         input_dim=input_dim,
                         output_dim=output_dim,
+                        hidden_dim=int(cfg.get("probe_hidden_dim", 512)),
                     )
                     self.prober_metadata[name] = {"level": level, "target": col}
                     if col not in normalizer_stats:
