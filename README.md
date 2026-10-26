@@ -14,10 +14,10 @@ This repository extends the official implementation of [H-JEPA](https://arxiv.or
 ## Summary of findings
 
 1. **Reproduction of Fig. 4.** For the 4-level model (3 model seeds), distractor-position NMSE per level is 0.053 / 0.167 / 0.340 / 0.553, consistent with the values reported in the paper (≈0.06 / 0.19 / 0.37 / 0.58).
-2. **Level-wise trend across MLP probe widths.** For both the 3-level and the 4-level model, distractor-position NMSE increases monotonically with level for MLP probes of width 128, 512 and 2048. For the 3-level model, results are largely saturated beyond width 128 (level-3 NMSE changes by at most 0.02). For the 4-level model, higher-level NMSE decreases slightly with width (by 0.07 at L3 and 0.06 at L4 from width 128 to 2048), a change comparable to the variation across model seeds; this comparison uses a single model seed.
-3. **Sensitivity to probe class.** A linear probe yields substantially higher NMSE (0.446 / 0.672 / 0.903). The amount of information that appears to be discarded therefore depends strongly on whether the probe is linear or nonlinear.
+2. **Level-wise trend across probes.** For the 2-, 3- and 4-level models, distractor-position NMSE increases monotonically with level for every probe tested (linear, and MLP of width 128, 512 and 2048). Beyond width 128, results are largely saturated for the 2- and 3-level models (at most 0.03 change at the top level). For the 4-level model, higher-level NMSE decreases slightly with width (by 0.07 at L3 and 0.06 at L4 from width 128 to 2048), a change comparable to the variation across model seeds; the capacity sweeps use a single model seed.
+3. **Sensitivity to probe class.** At every depth, a linear probe yields substantially higher distractor-position NMSE than any MLP probe (e.g. 0.446 / 0.672 / 0.903 for the 3-level model; 0.978 at L4 of the 4-level model). The amount of information that appears to be discarded therefore depends strongly on whether the probe is linear or nonlinear.
 4. **Random-encoder baseline.** An untrained encoder of identical architecture yields distractor-position NMSE of 0.77–0.80 and agent-position NMSE of 0.90–0.92 at all levels, confirming that the decodable information is acquired through training.
-5. **Unresolved discrepancy.** For the 2-level model (Fig. 12), level-2 results agree with the paper, whereas level-1 distractor-position NMSE does not (0.156 vs ≈0.01).
+5. **Unresolved discrepancy.** For the 2-level model (Fig. 12, 3 model seeds), agent-position results agree with the paper, whereas distractor-position NMSE is higher at both levels (L1: 0.288 vs ≈0.01; L2: 0.503 vs ≈0.33). The gap is not explained by probe capacity: with an MLP-2048 probe, level-1 NMSE is still 0.144.
 
 ## Background and research question
 
@@ -71,14 +71,29 @@ The cached runner was validated against the official pipeline: on the 3-level mo
 
 Agent-position NMSE is ≈1e-4 at all levels, as in the paper.
 
-### Reproduction of Fig. 12 (2-level model, seed 42)
+### Reproduction of Fig. 12 (2-level model, official MLP-512 probe)
 
 | | Agent L1 | Agent L2 | Distractor L1 | Distractor L2 |
 |---|---|---|---|---|
-| Paper | ≈0 | ≈0 | ≈0.01 | ≈0.33 ± 0.01 |
-| This work | 4e-5 | 7e-5 | **0.156** | 0.341 |
+| Paper (3 model seeds) | ≈0 | ≈0 | ≈0.01 | ≈0.33 ± 0.01 |
+| This work (3 model seeds, mean ± SE) | 5e-5 | 8e-5 | **0.288 ± 0.067** | **0.503 ± 0.082** |
+| Seed 42 / 43 / 44 | 4e-5 / 5e-5 / 5e-5 | 7e-5 / 7e-5 / 9e-5 | 0.156 / 0.340 / 0.369 | 0.341 / 0.557 / 0.610 |
 
-Level-2 results agree with the paper; the level-1 distractor result does not. The caption of Fig. 12 states that probe heads differ across environments, so the probe used for this figure may differ from the released configuration. The cause has not been identified.
+Agent-position results agree with the paper; distractor-position results are higher at both levels for every model seed. Probe capacity does not account for the difference (see the 2-level capacity sweep below). The caption of Fig. 12 states that probe heads differ across environments, whereas the released code uses a single MLP-512 probe for all environments, so the probe or model configuration used for this figure may differ from the released one. The cause has not been identified.
+
+### Probe capacity (2-level model, seed 42)
+
+| Probe | Distractor position L1 / L2 | Geodesic distance L1 / L2 | Agent position | Train–evaluation gap at L2 |
+|---|---|---|---|---|
+| Linear | 0.499 / 0.772 | 0.824 / 0.862 | 0.004–0.011 | 0.005 |
+| MLP-128 | 0.166 / 0.369 | 0.197 / 0.414 | ≈5e-5 | 0.027 |
+| MLP-512 (official) | 0.156 / 0.341 | 0.176 / 0.390 | ≈6e-5 | 0.033 |
+| MLP-2048 | 0.144 / 0.312 | 0.173 / 0.370 | ≈8e-5 | 0.031 |
+| Paper, Fig. 12 | ≈0.01 / ≈0.33 | — | ≈0 | — |
+
+- **Level ordering.** NMSE increases from L1 to L2 for every probe.
+- **Capacity.** The linear-to-MLP step dominates; from MLP-128 to MLP-2048, NMSE decreases by 0.02 (L1) and 0.06 (L2).
+- **Fig. 12.** Level-1 distractor NMSE remains an order of magnitude above the paper's value even with MLP-2048, so the discrepancy is not a matter of probe capacity.
 
 ### Probe capacity (3-level model, seed 42)
 
@@ -101,11 +116,13 @@ The paper does not report probing results for the 3-level model.
 
 | Probe | Distractor position L1 / L2 / L3 / L4 | Train–evaluation gap at L4 |
 |---|---|---|
+| Linear | 0.367 / 0.614 / 0.881 / 0.978 | 0.021 |
 | MLP-128 | 0.051 / 0.188 / 0.411 / 0.643 | 0.027 |
 | MLP-512 (official) | 0.046 / 0.168 / 0.377 / 0.617 | 0.049 |
 | MLP-2048 | 0.043 / 0.152 / 0.339 / 0.579 | 0.042 |
 
-- **Level ordering.** NMSE increases from L1 to L4 for every probe width.
+- **Level ordering.** NMSE increases from L1 to L4 for every probe, including the linear one.
+- **Probe class.** With the linear probe, L4 distractor NMSE is 0.978, i.e. distractor position is essentially not linearly decodable at the top level, whereas MLP probes recover part of it (0.58–0.64). Agent position remains linearly decodable at all levels (NMSE 0.003–0.009).
 - **Capacity.** From MLP-128 to MLP-2048, NMSE decreases by 0.07 at L3 and 0.06 at L4, compared with at most 0.02 for the 3-level model. The magnitude is comparable to the variation across model seeds in Fig. 4 (≈0.07); with a single model seed, it cannot be distinguished from seed variation.
 - **Overfitting.** The train–evaluation gap of MLP-2048 does not exceed that of MLP-512, indicating no additional overfitting.
 
@@ -131,13 +148,13 @@ The representations contain more distractor information than was anticipated in 
 
 ## Discussion
 
-Within the MLP family, the qualitative conclusion of the paper holds: distractor information becomes progressively less decodable at higher levels for every probe width tested, in both the 3-level and the 4-level model. The absolute values at higher levels of the 4-level model decrease slightly with probe width, so the amount of information recoverable at those levels is somewhat sensitive to probe capacity. The effect of probe class is considerably larger. A linear probe would suggest that even the first level discards most distractor information, whereas nonlinear probes show that it remains largely recoverable. Statements about what a level "discards" should therefore specify the probe used.
+Within the MLP family, the qualitative conclusion of the paper holds: distractor information becomes progressively less decodable at higher levels for every probe width tested, in the 2-, 3- and 4-level models. The absolute values at higher levels of the 4-level model decrease slightly with probe width, so the amount of information recoverable at those levels is somewhat sensitive to probe capacity. The effect of probe class is considerably larger. A linear probe would suggest that even the first level discards most distractor information, whereas nonlinear probes show that it remains largely recoverable. Statements about what a level "discards" should therefore specify the probe used.
 
 ## Limitations
 
 - All probes use a single probe seed (42), following the official configuration.
-- The capacity sweeps (3-level and 4-level) and the Fig. 12 reproduction use a single model seed (42).
-- The Fig. 12 level-1 discrepancy is unresolved.
+- The capacity sweeps (2-, 3- and 4-level) use a single model seed (42).
+- The Fig. 12 distractor discrepancy is unresolved; probe capacity has been ruled out as its cause.
 - FourRoom contains no fast-changing proprioceptive variables. The broader claim that higher levels discard fast variables (e.g. leg pose) while retaining position requires evaluation in an embodied environment such as Ant, which H-JEPA also provides.
 
 ## Reproducibility
